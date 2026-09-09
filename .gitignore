@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+.wallets.json
+.armed.json
+.chats.json
