@@ -25,6 +25,10 @@ export interface StoredWallet {
   encrypted: string;
   spendEth: number;
   createdAt: string;
+  /** The owner must let you in. Funding alone does not enter you into the buy. */
+  approved?: boolean;
+  /** Fee tier the buy went through, so the sell routes back the same way. */
+  soldFee?: number;
 }
 
 type Db = Record<string, StoredWallet>;
@@ -102,10 +106,35 @@ export function all(): StoredWallet[] {
   return Object.values(load());
 }
 
-/** Only the ones with something to spend. A wallet nobody funded is not a
- *  participant, and firing an empty wallet just burns gas on a revert. */
+/**
+ * Funded AND approved.
+ *
+ * Anyone with the bot's handle can /start and fund a wallet, so funding cannot
+ * be what enters you into the buy — otherwise a stranger joins by knowing the
+ * name. The owner approves; until then a funded wallet just sits there.
+ */
 export function armedWallets(): StoredWallet[] {
-  return all().filter((w) => w.spendEth > 0);
+  return all().filter((w) => w.spendEth > 0 && w.approved === true);
+}
+
+/** Funded, waiting on the owner. */
+export function pendingWallets(): StoredWallet[] {
+  return all().filter((w) => w.spendEth > 0 && w.approved !== true);
+}
+
+export function setApproved(telegramId: number, approved: boolean): StoredWallet {
+  const db = load();
+  const w = db[String(telegramId)];
+  if (!w) throw new Error('no wallet for that user');
+  w.approved = approved;
+  save(db);
+  return w;
+}
+
+/** Find by @handle or by numeric id, so the owner can type either. */
+export function findByHandleOrId(needle: string): StoredWallet | null {
+  const n = needle.replace(/^@/, '').toLowerCase();
+  return all().find((w) => w.handle.replace(/^@/, '').toLowerCase() === n || String(w.telegramId) === n) ?? null;
 }
 
 export function setSpend(telegramId: number, spendEth: number): void {
@@ -113,6 +142,14 @@ export function setSpend(telegramId: number, spendEth: number): void {
   const w = db[String(telegramId)];
   if (!w) throw new Error('no wallet for that user yet — send /start first');
   w.spendEth = spendEth;
+  save(db);
+}
+
+export function setSoldFee(telegramId: number, fee: number): void {
+  const db = load();
+  const w = db[String(telegramId)];
+  if (!w) return;
+  w.soldFee = fee;
   save(db);
 }
 

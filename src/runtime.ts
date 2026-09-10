@@ -62,22 +62,22 @@ export function armAgeMinutes(): number | null {
 }
 
 /**
- * Whoever sends /start first becomes the admin — in practice the person who set
- * the bot up. Only they can arm, disarm or prep. Everyone else can still make a
- * wallet, fund it and set a spend.
+ * The owner is pinned by Telegram id in the env, not learned at runtime.
+ *
+ * It used to be "whoever /starts first after boot", which handed ownership to
+ * whoever happened to text the bot after a restart — on 9 Sept that was Deber,
+ * and Francis could not arm his own bot. An identity that moves when the
+ * process restarts is not an identity.
  */
-let adminId: number | null = null;
+const OWNER_ID = Number(process.env.OWNER_TELEGRAM_ID ?? '0') || null;
 
-export function claimAdmin(telegramId: number): boolean {
-  if (adminId === null) {
-    adminId = telegramId;
-    return true;
-  }
-  return adminId === telegramId;
+export function claimAdmin(_telegramId: number): boolean {
+  return true; // kept for call-site compatibility; ownership is not claimable
 }
 
-export const isAdmin = (telegramId: number) => adminId === null || adminId === telegramId;
-export const adminSet = () => adminId !== null;
+/** With no OWNER_TELEGRAM_ID set, nobody is owner — fail closed, not open. */
+export const isAdmin = (telegramId: number) => OWNER_ID !== null && telegramId === OWNER_ID;
+export const ownerId = () => OWNER_ID;
 
 
 /** Whether /prep has been run since boot. Only used to nag in the heartbeat. */

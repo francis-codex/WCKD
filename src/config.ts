@@ -23,9 +23,14 @@ export const ROUTER: Address = getAddress('0x2626664c2603336E57B271c5C0b26F42174
  * either one filling is the signal. The 0.05% pool already carries a one-sided
  * WETH position, which means somebody else is parked and waiting too.
  */
-export const POOLS: { address: Address; fee: number; label: string }[] = [
-  { address: getAddress('0x7ed7bfbcc7167fcb87f43ca730548dd52547e774'), fee: 500, label: '0.05%' },
-  { address: getAddress('0xa321d950082166d11db11cfbd6e32a91e6144ff0'), fee: 10000, label: '1%' },
+export const POOLS: { address: Address; fee: number; label: string; buyable: boolean }[] = [
+  { address: getAddress('0x7ed7bfbcc7167fcb87f43ca730548dd52547e774'), fee: 500, label: 'WETH 0.05%', buyable: true },
+  { address: getAddress('0x9e235c14fc46534906d5b2709c0fc40014862cec'), fee: 3000, label: 'WETH 0.3%', buyable: true },
+  { address: getAddress('0xa321d950082166d11db11cfbd6e32a91e6144ff0'), fee: 10000, label: 'WETH 1%', buyable: true },
+  // USDC-paired. We hold WETH, so this cannot be bought through directly —
+  // watched so that if the launch lands here we hear about it in the same
+  // second and can act by hand, rather than staring at three empty pools.
+  { address: getAddress('0x7702411b3893ea4f6ab96c50231cfec65448ab9f'), fee: 10000, label: 'USDC 1%', buyable: false },
 ];
 
 export const CHAIN_ID = 8453;
@@ -125,8 +130,20 @@ export const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT_ID?.trim() || '';
  * Gas headroom over the current base fee. A launch block is contested and being
  * outbid by a gwei costs the whole trade, so we overpay on purpose.
  */
-export const PRIORITY_FEE_GWEI = Number(process.env.PRIORITY_FEE_GWEI ?? '0.05');
+// 0.05 gwei was the quiet-day rate and it would have put us behind everybody.
+// On a contested launch people bid whole gwei. At a 250k gas limit, 1.5 gwei of
+// priority costs about $1 on an $824 position — obviously worth paying to be
+// near the front of the block rather than politely at the back.
+export const PRIORITY_FEE_GWEI = Number(process.env.PRIORITY_FEE_GWEI ?? '1.5');
 export const MAX_FEE_MULTIPLIER = Number(process.env.MAX_FEE_MULTIPLIER ?? '3');
+
+/**
+ * A Uniswap V3 exactInputSingle lands around 150k. 400k was padding, but the
+ * transaction must RESERVE maxFee × gasLimit up front, and most of these
+ * wallets hold only 0.002 ETH — so an oversized limit was capping how hard we
+ * could bid. Unused gas is refunded either way.
+ */
+export const SWAP_GAS_LIMIT = 250_000n;
 
 
 /** 13:00 WAT on 9 Sept 2026 = 12:00 UTC. Announced by the project itself. */

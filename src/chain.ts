@@ -86,5 +86,12 @@ export const poolAbi = parseAbi([
   'event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)',
 ]);
 
+/** Just enough to ask an unknown address "are you a WETH pool, and at what fee?" */
+export const poolAbi2 = parseAbi([
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function fee() view returns (uint24)',
+]);
+
 export const fmtEth = (wei: bigint) => (Number(wei) / 1e18).toLocaleString('en-GB', { maximumFractionDigits: 6 });
 export const short = (a: Address) => `${a.slice(0, 6)}…${a.slice(-4)}`;

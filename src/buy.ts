@@ -13,11 +13,12 @@
 import { parseEther, parseGwei, type Address } from 'viem';
 import {
   LAPTOP, WETH, ROUTER, CHAIN_ID,
-  PRIORITY_FEE_GWEI, MAX_FEE_MULTIPLIER, type SniperWallet,
+  PRIORITY_FEE_GWEI, MAX_FEE_MULTIPLIER, SWAP_GAS_LIMIT, type SniperWallet,
 } from './config.js';
 import { isArmed } from './runtime.js';
 import { http_, walletFor, routerAbi } from './chain.js';
 import { notify, basescanTx } from './notify.js';
+import { all as allWallets, setSoldFee } from './store.js';
 
 export interface BuyResult {
   wallet: string;
@@ -55,6 +56,21 @@ export async function buy(w: SniperWallet, fee: number): Promise<BuyResult> {
     maxFeePerGas = parseGwei('0.5');
   }
 
+  // A transaction whose maxFee × gasLimit exceeds the wallet's ETH is REJECTED
+  // outright — not outbid, not slow, simply never broadcast. Being outbid is a
+  // maybe; failing to submit is a certain miss. So bid as hard as the balance
+  // allows and no harder.
+  try {
+    const bal = await http_.getBalance({ address: account.address });
+    const affordable = (bal * 95n) / 100n / SWAP_GAS_LIMIT; // 5% back for the wrap of rounding
+    if (affordable > 0n && maxFeePerGas > affordable) {
+      maxFeePerGas = affordable;
+      if (maxPriorityFeePerGas > maxFeePerGas) maxPriorityFeePerGas = maxFeePerGas;
+    }
+  } catch {
+    /* if we cannot read the balance, go with what we computed */
+  }
+
   if (!isArmed()) {
     return {
       wallet: w.name,
@@ -72,9 +88,9 @@ export async function buy(w: SniperWallet, fee: number): Promise<BuyResult> {
       functionName: 'exactInputSingle',
       args: [params],
       chain: undefined,
-      // A fixed limit skips an estimateGas round trip. exactInputSingle on a
-      // fresh pool lands well under this; unused gas is refunded anyway.
-      gas: 400_000n,
+      // A fixed limit skips an estimateGas round trip, and a tighter one frees
+      // up balance to bid harder on priority.
+      gas: SWAP_GAS_LIMIT,
       maxFeePerGas,
       maxPriorityFeePerGas,
       nonce: await http_.getTransactionCount({ address: account.address, blockTag: 'pending' }),
@@ -93,6 +109,8 @@ export async function buyAll(wallets: SniperWallet[], fee: number, poolLabel: st
   );
 
   const results = await Promise.all(wallets.map((w) => buy(w, fee)));
+  // Remember the tier so /sell routes back through the same pool.
+  for (const sw of allWallets()) setSoldFee(sw.telegramId, fee);
 
   for (const r of results) {
     if (r.dryRun) {

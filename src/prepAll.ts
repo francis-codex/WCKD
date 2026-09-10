@@ -6,7 +6,7 @@
 // is one swap and nothing else.
 
 import { formatEther, parseEther, maxUint256 } from 'viem';
-import { WETH, ROUTER, type SniperWallet } from './config.js';
+import { WETH, ROUTER, LAPTOP, type SniperWallet } from './config.js';
 import { http_, walletFor, erc20Abi, wethAbi } from './chain.js';
 
 export interface PrepLine {
@@ -62,6 +62,30 @@ export async function prepareOne(w: SniperWallet, live: boolean): Promise<PrepLi
       }
     } else {
       steps.push('router approved');
+    }
+
+    // Approve LAPTOP for the router NOW, before we own any. Approval does not
+    // need a balance, and doing it here means the eventual SELL is one
+    // transaction instead of approve-then-swap. On a launch dump that is the
+    // difference between getting out and watching yourself not get out.
+    try {
+      const lapAllow = await http_.readContract({
+        address: LAPTOP, abi: erc20Abi, functionName: 'allowance', args: [account.address, ROUTER],
+      });
+      if (lapAllow < maxUint256 / 2n) {
+        if (!live) steps.push('would pre-approve LAPTOP for selling');
+        else {
+          const hash = await client.writeContract({
+            address: LAPTOP, abi: erc20Abi, functionName: 'approve', args: [ROUTER, maxUint256],
+          });
+          await http_.waitForTransactionReceipt({ hash });
+          steps.push('sell pre-approved');
+        }
+      } else {
+        steps.push('sell ready');
+      }
+    } catch {
+      steps.push('sell approval failed — you can still sell, it just costs one extra tx');
     }
 
     return { name: w.name, ok: true, detail: steps.join(', ') };

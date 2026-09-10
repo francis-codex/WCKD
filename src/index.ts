@@ -17,7 +17,7 @@ import {
   MIN_POOL_TOKENS, MIN_POOL_WETH_WEI, countdown, type SniperWallet,
 } from './config.js';
 import { isArmed, restoredFromDisk, armAgeMinutes, isPrepped } from './runtime.js';
-import { http_, getWs, erc20Abi, short } from './chain.js';
+import { http_, getWs, erc20Abi, poolAbi2, short } from './chain.js';
 import { buyAll } from './buy.js';
 import { notify } from './notify.js';
 import { runBot } from './bot.js';
@@ -60,7 +60,13 @@ async function looksReal(poolAddress: `0x${string}`): Promise<{ ok: boolean; lap
     http_.readContract({ address: LAPTOP, abi: erc20Abi, functionName: 'balanceOf', args: [poolAddress] }).catch(() => 0n),
     http_.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [poolAddress] }).catch(() => 0n),
   ]);
-  return { ok: laptop >= MIN_POOL_TOKENS && weth >= MIN_POOL_WETH_WEI, laptop, weth };
+  // The LAPTOP floor is the whole guard. Requiring WETH as well was wrong:
+  // a SINGLE-SIDED token add is a normal V3 launch — the team seeds tokens and
+  // buyers bring the ETH — and on 9 Sept the 0.05% pool held 0.0008 WETH, so
+  // that condition would have blocked a real launch there and we would have
+  // missed it. Nobody but the team holds 100,000 LAPTOP before launch, so
+  // there is nothing to bait us with. WETH is reported, not required.
+  return { ok: laptop >= MIN_POOL_TOKENS, laptop, weth };
 }
 
 async function trigger(poolAddress: string, fee: number, label: string, how: string) {
@@ -82,6 +88,18 @@ async function trigger(poolAddress: string, fee: number, label: string, how: str
           `<i>Not firing. Still watching.</i>`,
       );
     }
+    return;
+  }
+
+  const cfg = POOLS.find((x) => x.address.toLowerCase() === poolAddress.toLowerCase());
+  if (cfg && !cfg.buyable) {
+    // We hold WETH; this pair does not take it. Shout, do not latch, keep
+    // watching the pools we CAN buy through.
+    await notify(
+      `🚨🚨 <b>LAPTOP IS LIVE in the ${label} pool</b> — ${formatEther(check.laptop)} tokens.\n` +
+        `<b>We cannot auto-buy this pair (it wants USDC, we hold WETH).</b>\n` +
+        `Buy by hand NOW: https://dexscreener.com/base/${poolAddress}`,
+    );
     return;
   }
 
@@ -138,6 +156,88 @@ function watchLogs(): boolean {
   } catch (e) {
     console.error('  could not open the log subscription:', (e as Error).message);
     return false;
+  }
+}
+
+
+/**
+ * The catch-all.
+ *
+ * Watching four known pool addresses only works if the launch uses one of them.
+ * A brand-new fee tier, or a venue nobody has created yet, has an address that
+ * cannot be known in advance — so instead watch the TOKEN and let the launch
+ * tell us where it went.
+ *
+ * Any large LAPTOP transfer is the signal. If the destination turns out to be a
+ * Uniswap V3 pool paired against WETH, we can buy it whatever its address is.
+ * Anything else we shout about so a human can act in the same minute.
+ */
+function watchTokenWide(): boolean {
+  const wsc = getWs();
+  if (!wsc) return false;
+  try {
+    wsc.watchContractEvent({
+      address: LAPTOP,
+      abi: erc20Abi,
+      eventName: 'Transfer',
+      onLogs: (logs: any[]) => {
+        for (const log of logs) {
+          const to = log?.args?.to as `0x${string}` | undefined;
+          const value = log?.args?.value as bigint | undefined;
+          if (!to || !value || value < MIN_POOL_TOKENS) continue;
+          if (POOLS.some((p) => p.address.toLowerCase() === to.toLowerCase())) continue; // already covered
+          void inspectUnknown(to, value);
+        }
+      },
+      onError: () => { /* the per-pool watchers and the poll still stand */ },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Work out what this address is, then buy through it or shout about it. */
+const seenUnknown = new Set<string>();
+
+async function inspectUnknown(to: `0x${string}`, value: bigint): Promise<void> {
+  if (fired) return;
+  if (seenUnknown.has(to.toLowerCase())) return;
+  seenUnknown.add(to.toLowerCase());
+  try {
+    // The airdrop is 20% of supply going out to ordinary wallets in equal
+    // chunks, and each one looks exactly like a large transfer. A plain address
+    // with no contract code cannot be a pool, so it is never the launch —
+    // and alerting on every one of them would bury the signal we care about
+    // under a hundred notifications at exactly the wrong moment.
+    const code = await http_.getBytecode({ address: to }).catch(() => undefined);
+    if (!code || code === '0x') {
+      console.log(`  · airdrop-shaped transfer to ${to} (${formatEther(value)}) — plain wallet, ignoring`);
+      return;
+    }
+    const [t0, t1, fee] = await Promise.all([
+      http_.readContract({ address: to, abi: poolAbi2, functionName: 'token0' }).catch(() => null),
+      http_.readContract({ address: to, abi: poolAbi2, functionName: 'token1' }).catch(() => null),
+      http_.readContract({ address: to, abi: poolAbi2, functionName: 'fee' }).catch(() => null),
+    ]);
+
+    const pairedWithWeth =
+      (t0 as string)?.toLowerCase() === WETH.toLowerCase() ||
+      (t1 as string)?.toLowerCase() === WETH.toLowerCase();
+
+    if (t0 && t1 && fee !== null && pairedWithWeth) {
+      await notify(`🚨 <b>New pool found</b> — ${formatEther(value)} LAPTOP into ${to} (fee ${fee}). Buying through it.`);
+      await trigger(to, Number(fee), `new pool ${String(fee)}`, 'token-wide watch');
+      return;
+    }
+
+    await notify(
+      `🚨🚨 <b>${formatEther(value)} LAPTOP moved to ${to}</b>\n` +
+        `Not a WETH pool we can route through — <b>look now</b>.\n` +
+        `https://basescan.org/address/${to}`,
+    );
+  } catch {
+    await notify(`⚠️ Large LAPTOP transfer to ${to} but could not identify it. https://basescan.org/address/${to}`);
   }
 }
 
@@ -238,13 +338,14 @@ async function main() {
   );
 
   const live = watchLogs();
+  const wide = watchTokenWide();
   if (!live) {
     console.log('\n  ⚠ NO WEBSOCKET. Falling back to a 2s poll — up to 2 seconds late.');
     console.log('    The public Base endpoint serves none. Set BASE_WSS to an Alchemy');
     console.log('    or QuickNode Base url before the window opens.\n');
     await notify('⚠️ <b>No WebSocket</b> — polling every 2s instead. Set <code>BASE_WSS</code> to a real provider or we are up to 2s late.');
   } else {
-    console.log('  ✓ log subscription live on both pools\n');
+    console.log(`  ✓ log subscription live on ${POOLS.length} pools${wide ? ' + token-wide catch-all' : ''}\n`);
   }
   void pollBalances();
 
